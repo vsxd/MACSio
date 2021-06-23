@@ -1,3 +1,6 @@
+.vscode
+install
+
 #CMAKE
 CMakeCache.txt
 CMakeFiles
@@ -13,3 +16,6 @@ CTestTestfile.cmake
 
 # Docs
 doc/MACSio_User_Guide
+
+# IDE
+.idea
