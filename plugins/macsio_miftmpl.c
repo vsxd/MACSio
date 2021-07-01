@@ -33,6 +33,7 @@ end-of-copyright-header */
 #include <macsio_main.h>
 #include <macsio_mif.h>
 #include <macsio_utils.h>
+#include <macsio_timing.h>
 
 #include <stdio.h>
 
@@ -164,14 +165,20 @@ which the JSON object for this part was written in the file and the part's ID.
 static json_object *write_mesh_part(
     FILE *myFile,          /**< [in] The file handle being used in a MIF dump */
     char const *fileName,  /**< [in] Name of the MIF file */
-    json_object *part_obj  /**< [in] The json object representing this mesh part */
+    json_object *part_obj,  /**< [in] The json object representing this mesh part */
+    int dumpn
 )
 {
     json_object *part_info = json_object_new_object();
+    MACSIO_TIMING_GroupMask_t main_dump_mif_grp = MACSIO_TIMING_GroupMask("main_dump_mif");
+    MACSIO_TIMING_TimerId_t main_dump_mif_tid;
+    double timer_dt;
 
 //#warning SOMEHOW SHOULD INCLUDE OFFSETS TO EACH VARIABLE
     /* Write the json mesh part object as an ascii string */
-    fprintf(myFile, "%s\n", json_object_to_json_string_ext(part_obj, JSON_C_TO_STRING_PRETTY));
+    main_dump_mif_tid = MT_StartTimer("write_json_to_file", main_dump_mif_grp, dumpn);
+    fprintf(myFile, "%s\n", json_object_to_json_string_ext(part_obj, JSON_C_TO_STRING_PLAIN));
+    timer_dt = MT_StopTimer(main_dump_mif_tid);
     json_object_free_printbuf(part_obj);
 
     /* Form the return 'value' holding the information on where to find this part */
@@ -270,7 +277,7 @@ static void main_dump(
     for (i = 0; i < json_object_array_length(parts); i++)
     {
         json_object *this_part = json_object_array_get_idx(parts, i);
-        json_object_array_add(part_infos, write_mesh_part(myFile, fileName, this_part));
+        json_object_array_add(part_infos, write_mesh_part(myFile, fileName, this_part, dumpn));
     }
 
     /* Hand off the baton to the next processor. This winds up closing
