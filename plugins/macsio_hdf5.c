@@ -30,6 +30,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <stdio.h>
 #include <string.h>
 
+#include <libs3.h>
 #include <json-cwx/json.h>
 
 #include <macsio_clargs.h>
@@ -140,11 +141,27 @@ static int show_errors = 0;
 static char compression_alg_str[64];
 static char compression_params_str[512];
 
+//
+static size_t vfd_core_increment = 1 << 21;
+
+// All necessary parameters for the S3 API
+static char *access_key = NULL;
+static char *secret_key = NULL;
+static char *host = NULL;
+static char *auth_region = NULL;
+static char *sample_bucket = NULL;
+
 /*! \brief create HDF5 library file access property list */
 static hid_t make_fapl()
 {
     hid_t fapl_id = H5Pcreate(H5P_FILE_ACCESS);
     herr_t h5status = 0;
+
+    herr_t ret_value = H5Pset_fapl_core(fapl_id, vfd_core_increment, false); //increment=2M
+    if (ret_value < 0)
+    {
+        printf(">>>> hdf5 plugin, set Core VFD error");
+    }
     // herr_t ret_value = H5Pset_driver(fapl_id, H5FD_CORE, NULL);
     // if (ret_value < 0){
     //     printf(">>>> hdf5 plugin, H5Pset_driver() error");
@@ -202,11 +219,6 @@ static hid_t make_fapl()
         return 0;
     }
 
-    // herr_t ret_value = H5Pset_fapl_core(fapl_id, 1 << 21, false); //increment=2M
-    // if (ret_value < 0)
-    // {
-    //     printf(">>>> hdf5 plugin, set Core VFD error");
-    // }
     return fapl_id;
 }
 
@@ -515,191 +527,92 @@ process_args(
 #endif
                                  MACSIO_CLARGS_END_OF_ARGS);
 
+    // Read environment variables for S3 configuration
+    char *p = NULL;
+    p = getenv("S3_ACCESS_KEY");
+    if (p != NULL)
+        access_key = p;
+    p = getenv("S3_SECRET_KEY");
+    if (p != NULL)
+        secret_key = p;
+    p = getenv("S3_HOST");
+    if (p != NULL)
+        host = p;
+    p = getenv("S3_REGION");
+    if (p != NULL)
+        auth_region = p;
+    p = getenv("S3_BUCKET");
+    if (p != NULL)
+        sample_bucket = p;
+
+    printf("host=%s\nauth_region=%s\naccess_key=%s\nsecret_key=%s\nsample_bucket=%s\n", host, auth_region, access_key, secret_key, sample_bucket);
+
     if (!show_errors)
         H5Eset_auto1(0, 0);
     return 0;
 }
 
-/*! \brief Single shared file implementation of main dump */
-static void
-main_dump_sif(
-    json_object *main_obj, /**< main json data object to dump */
-    int dumpn,             /**< dump number (like a cycle number) */
-    double dumpt           /**< dump time */
-)
+/*
+libs3 related functions
+*/
+static S3Status responsePropertiesCallback(
+    const S3ResponseProperties *properties,
+    void *callbackData)
 {
-    MACSIO_TIMING_GroupMask_t main_dump_sif_grp = MACSIO_TIMING_GroupMask("main_dump_sif");
-    MACSIO_TIMING_TimerId_t main_dump_sif_tid;
-    double timer_dt;
-
-#ifdef HAVE_MPI
-    int ndims;
-    int i, v, p;
-    char const *mesh_type = json_object_path_get_string(main_obj, "clargs/part_type");
-    char fileName[256];
-    int use_part_count;
-
-    hid_t h5file_id;
-    hid_t fapl_id = make_fapl();
-    hid_t dxpl_id = H5Pcreate(H5P_DATASET_XFER);
-    hid_t dcpl_id = H5Pcreate(H5P_DATASET_CREATE);
-    hid_t null_space_id = H5Screate(H5S_NULL);
-    hid_t fspace_nodal_id, fspace_zonal_id;
-    hsize_t global_log_dims_nodal[3];
-    hsize_t global_log_dims_zonal[3];
-
-    MPI_Info mpiInfo = MPI_INFO_NULL;
-
-//#warning WE ARE DOING SIF SLIGHTLY WRONG, DUPLICATING SHARED NODES
-//#warning INCLUDE ARGS FOR ISTORE AND K_SYM
-//#warning INCLUDE ARG PROCESS FOR HINTS
-//#warning FAPL PROPS: ALIGNMENT
-#if H5_HAVE_PARALLEL
-    H5Pset_fapl_mpio(fapl_id, MACSIO_MAIN_Comm, mpiInfo);
-#endif
-
-    //#warning FOR MIF, NEED A FILEROOT ARGUMENT OR CHANGE TO FILEFMT ARGUMENT
-    /* Construct name for the HDF5 file */
-    sprintf(fileName, "%s_hdf5_%03d.%s",
-            json_object_path_get_string(main_obj, "clargs/filebase"),
-            dumpn,
-            json_object_path_get_string(main_obj, "clargs/fileext"));
-
-    MACSIO_UTILS_RecordOutputFiles(dumpn, fileName);
-    main_dump_sif_tid = MT_StartTimer("H5Fcreate", main_dump_sif_grp, dumpn);
-    h5file_id = H5Fcreate(fileName, H5F_ACC_TRUNC, H5P_DEFAULT, fapl_id);
-    timer_dt = MT_StopTimer(main_dump_sif_tid);
-
-    /* Create an HDF5 Dataspace for the global whole of mesh and var objects in the file. */
-    ndims = json_object_path_get_int(main_obj, "clargs/part_dim");
-    json_object *global_log_dims_array =
-        json_object_path_get_array(main_obj, "problem/global/LogDims");
-    json_object *global_parts_log_dims_array =
-        json_object_path_get_array(main_obj, "problem/global/PartsLogDims");
-    /* Note that global zonal array is smaller in each dimension by one *ON*EACH*BLOCK*
-       in the associated dimension. */
-    for (i = 0; i < ndims; i++)
-    {
-        int parts_log_dims_val = JsonGetInt(global_parts_log_dims_array, "", i);
-        global_log_dims_nodal[ndims - 1 - i] = (hsize_t)JsonGetInt(global_log_dims_array, "", i);
-        global_log_dims_zonal[ndims - 1 - i] = global_log_dims_nodal[ndims - 1 - i] -
-                                               JsonGetInt(global_parts_log_dims_array, "", i);
-    }
-    fspace_nodal_id = H5Screate_simple(ndims, global_log_dims_nodal, 0);
-    fspace_zonal_id = H5Screate_simple(ndims, global_log_dims_zonal, 0);
-
-    /* Get the list of vars on the first part as a guide to loop over vars */
-    json_object *part_array = json_object_path_get_array(main_obj, "problem/parts");
-    json_object *first_part_obj = json_object_array_get_idx(part_array, 0);
-    json_object *first_part_vars_array = json_object_path_get_array(first_part_obj, "Vars");
-
-    /* Dataset transfer property list used in all H5Dwrite calls */
-#if H5_HAVE_PARALLEL
-    if (no_collective)
-        H5Pset_dxpl_mpio(dxpl_id, H5FD_MPIO_INDEPENDENT);
-    else
-        H5Pset_dxpl_mpio(dxpl_id, H5FD_MPIO_COLLECTIVE);
-#endif
-
-    /* Loop over vars and then over parts */
-    /* currently assumes all vars exist on all ranks. but not all parts */
-    for (v = -1; v < json_object_array_length(first_part_vars_array); v++) /* -1 start is for Mesh */
-    {
-
-        //#warning SKIPPING MESH
-        if (v == -1)
-            continue; /* All ranks skip mesh (coords) for now */
-
-        /* Inspect the first part's var object for name, datatype, etc. */
-        json_object *var_obj = json_object_array_get_idx(first_part_vars_array, v);
-        char const *varName = json_object_path_get_string(var_obj, "name");
-        char *centering = strdup(json_object_path_get_string(var_obj, "centering"));
-        json_object *dataobj = json_object_path_get_extarr(var_obj, "data");
-        //#warning JUST ASSUMING TWO TYPES NOW. CHANGE TO A FUNCTION
-        hid_t dtype_id = json_object_extarr_type(dataobj) == json_extarr_type_flt64 ? H5T_NATIVE_DOUBLE : H5T_NATIVE_INT;
-        hid_t fspace_id = H5Scopy(strcmp(centering, "zone") ? fspace_nodal_id : fspace_zonal_id);
-        hid_t dcpl_id = make_dcpl(compression_alg_str, compression_params_str, fspace_id, dtype_id);
-
-        /* Create the file dataset (using old-style H5Dcreate API here) */
-        //#warning USING DEFAULT DCPL: LATER ADD COMPRESSION, ETC.
-
-        main_dump_sif_tid = MT_StartTimer("H5Dcreate", main_dump_sif_grp, dumpn);
-        hid_t ds_id = H5Dcreate1(h5file_id, varName, dtype_id, fspace_id, dcpl_id);
-        timer_dt = MT_StopTimer(main_dump_sif_tid);
-        H5Sclose(fspace_id);
-        H5Pclose(dcpl_id);
-
-        /* Loop to make write calls for this var for each part on this rank */
-        //#warning USE NEW MULTI-DATASET API WHEN AVAILABLE TO AGLOMERATE ALL PARTS INTO ONE CALL
-        use_part_count = (int)ceil(json_object_path_get_double(main_obj, "clargs/avg_num_parts"));
-        for (p = 0; p < use_part_count; p++)
-        {
-            json_object *part_obj = json_object_array_get_idx(part_array, p);
-            json_object *var_obj = 0;
-            hid_t mspace_id = H5Scopy(null_space_id);
-            void const *buf = 0;
-
-            fspace_id = H5Scopy(null_space_id);
-
-            /* this rank actually has something to contribute to the H5Dwrite call */
-            if (part_obj)
-            {
-                int i;
-                hsize_t starts[3], counts[3];
-                json_object *vars_array = json_object_path_get_array(part_obj, "Vars");
-                json_object *mesh_obj = json_object_path_get_object(part_obj, "Mesh");
-                json_object *var_obj = json_object_array_get_idx(vars_array, v);
-                json_object *extarr_obj = json_object_path_get_extarr(var_obj, "data");
-                json_object *global_log_origin_array =
-                    json_object_path_get_array(part_obj, "GlobalLogOrigin");
-                json_object *global_log_indices_array =
-                    json_object_path_get_array(part_obj, "GlobalLogIndices");
-                json_object *mesh_dims_array = json_object_path_get_array(mesh_obj, "LogDims");
-                for (i = 0; i < ndims; i++)
-                {
-                    starts[ndims - 1 - i] =
-                        json_object_get_int(json_object_array_get_idx(global_log_origin_array, i));
-                    counts[ndims - 1 - i] =
-                        json_object_get_int(json_object_array_get_idx(mesh_dims_array, i));
-                    if (!strcmp(centering, "zone"))
-                    {
-                        counts[ndims - 1 - i]--;
-                        starts[ndims - 1 - i] -=
-                            json_object_get_int(json_object_array_get_idx(global_log_indices_array, i));
-                    }
-                }
-
-                /* set selection of filespace */
-                fspace_id = H5Dget_space(ds_id);
-                main_dump_sif_tid = MT_StartTimer("H5Sselect_hyperslab", main_dump_sif_grp, dumpn);
-                H5Sselect_hyperslab(fspace_id, H5S_SELECT_SET, starts, 0, counts, 0);
-                timer_dt = MT_StopTimer(main_dump_sif_tid);
-
-                /* set dataspace of data in memory */
-                mspace_id = H5Screate_simple(ndims, counts, 0);
-                buf = json_object_extarr_data(extarr_obj);
-            }
-
-            main_dump_sif_tid = MT_StartTimer("H5Dwrite", main_dump_sif_grp, dumpn);
-            H5Dwrite(ds_id, dtype_id, mspace_id, fspace_id, dxpl_id, buf);
-            timer_dt = MT_StopTimer(main_dump_sif_tid);
-            H5Sclose(fspace_id);
-            H5Sclose(mspace_id);
-        }
-
-        H5Dclose(ds_id);
-        free(centering);
-    }
-
-    H5Sclose(fspace_nodal_id);
-    H5Sclose(fspace_zonal_id);
-    H5Sclose(null_space_id);
-    H5Pclose(dxpl_id);
-    H5Pclose(fapl_id);
-    H5Fclose(h5file_id);
-
-#endif
+    // printf("responsePropertiesCallback\n");
+    return S3StatusOK;
 }
+
+static void responseCompleteCallback(
+    S3Status status,
+    const S3ErrorDetails *error,
+    void *callbackData)
+{
+    // printf(">>>> responseCompleteCallback(): %s\n", error->message);
+    return;
+}
+
+static const S3ResponseHandler responseHandler = {
+    &responsePropertiesCallback,
+    &responseCompleteCallback};
+
+typedef struct put_object_callback_data
+{
+    const char *dataStr;
+    uint64_t contentLength;
+} put_object_callback_data;
+
+static int putObjectDataCallback(int bufferSize, char *buffer, void *callbackData)
+{
+    put_object_callback_data *data = (put_object_callback_data *)callbackData;
+
+    int ret = 0;
+
+    if (data->contentLength)
+    {
+        // int toRead = ((data->contentLength > (unsigned)bufferSize) ? (unsigned)bufferSize : data->contentLength);
+        // ret = fread(buffer, 1, toRead, data->infile);
+
+        if (data->contentLength >= bufferSize)
+        {
+            memcpy(buffer, data->dataStr, bufferSize);
+            ret = bufferSize;
+        }
+        else
+        {
+            memcpy(buffer, data->dataStr, data->contentLength);
+            ret = data->contentLength;
+        }
+    }
+    data->contentLength -= ret;
+    printf("contentLength: %d\n", data->contentLength);
+    return ret;
+}
+
+static const S3PutObjectHandler putObjectHandler =
+    {
+        responseHandler,
+        &putObjectDataCallback};
 
 /*! \brief User data for MIF callbacks */
 typedef struct _user_data
@@ -718,6 +631,11 @@ CreateHDF5File(
     hid_t *retval = 0;
     hid_t h5File;
     hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    herr_t ret_value = H5Pset_fapl_core(fapl, vfd_core_increment, false); //increment=2M
+    if (ret_value < 0)
+    {
+        printf(">>>> hdf5 plugin, set Core VFD error");
+    }
     H5Pset_fclose_degree(fapl, H5F_CLOSE_SEMI);
     h5File = H5Fcreate(fname, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
     H5Pclose(fapl);
@@ -747,6 +665,11 @@ OpenHDF5File(
     hid_t *retval;
     hid_t h5File;
     hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    herr_t ret_value = H5Pset_fapl_core(fapl, vfd_core_increment, false); //increment=2M
+    if (ret_value < 0)
+    {
+        printf(">>>> hdf5 plugin, set Core VFD error");
+    }
     H5Pset_fclose_degree(fapl, H5F_CLOSE_SEMI);
     h5File = H5Fopen(fname, ioFlags.do_wr ? H5F_ACC_RDWR : H5F_ACC_RDONLY, fapl);
     H5Pclose(fapl);
@@ -898,6 +821,35 @@ main_dump_mif(
         H5Gclose(domain_group_id);
     }
 
+    H5Fflush(h5File, H5F_SCOPE_GLOBAL);
+    /* get the size of the file */
+    size_t image_size = H5Fget_file_image(h5File, NULL, (size_t)0);
+    /* allocate a buffer of the appropriate size */
+    void *image_ptr = malloc((size_t)image_size);
+    /* load the image of the file into the buffer */
+    size_t bytes_read = H5Fget_file_image(h5File, image_ptr, (size_t)image_size);
+    printf("image_size: %d\n", image_size);
+    printf("bytes_read: %d\n", bytes_read);
+    // printf("%s\n", (char *)image_ptr);
+
+    const S3BucketContext bucketContext = {
+        host,
+        sample_bucket,
+        S3ProtocolHTTPS,
+        S3UriStylePath,
+        access_key,
+        secret_key,
+        NULL,
+        auth_region};
+
+    main_dump_mif_grp = MT_StartTimer("write_s3_mif", main_dump_mif_grp, dumpn);
+    S3_put_object(&bucketContext, fileName, image_size, NULL, NULL, 0, &putObjectHandler, image_ptr);
+    timer_dt = MT_StopTimer(main_dump_mif_tid);
+
+    // FILE *file = fopen(fileName, "wb");
+    // fwrite(image_ptr, image_size, 1, file);
+    // fclose(file);
+
     /* If this is the 'root' processor, also write Silo's multi-XXX objects */
 #if 0
     if (rank == 0)
@@ -961,9 +913,9 @@ main_dump(
         //#warning ERRORS NEED TO GO TO LOG FILES AND ERROR BEHAVIOR NEEDS TO BE HONORED
         if (!strcmp(json_object_get_string(modestr), "SIF"))
         {
-            main_dump_tid = MT_StartTimer("main_dump_sif", main_dump_grp, dumpn);
-            main_dump_sif(main_obj, dumpn, dumpt);
-            timer_dt = MT_StopTimer(main_dump_tid);
+            // main_dump_tid = MT_StartTimer("main_dump_sif", main_dump_grp, dumpn);
+            MACSIO_LOG_MSG(Die, ("HDF5_S3 plugin cannot currently handle SIF mode"));
+            // timer_dt = MT_StopTimer(main_dump_tid);
         }
         else
         {
@@ -978,20 +930,21 @@ main_dump(
         char const *modestr = json_object_path_get_string(main_obj, "clargs/parallel_file_mode");
         if (!strcmp(modestr, "SIF"))
         {
-            float avg_num_parts = json_object_path_get_double(main_obj, "clargs/avg_num_parts");
-            if (avg_num_parts == (float((int)avg_num_parts)))
-            {
-                main_dump_tid = MT_StartTimer("main_dump_sif", main_dump_grp, dumpn);
-                main_dump_sif(main_obj, dumpn, dumpt);
-                timer_dt = MT_StopTimer(main_dump_tid);
-            }
-            else
-            {
-                //#warning CURRENTLY, SIF CAN WORK ONLY ON WHOLE PART COUNTS
-                MACSIO_LOG_MSG(Die, ("HDF5 plugin cannot currently handle SIF mode where "
-                                     "there are different numbers of parts on each MPI rank. "
-                                     "Set --avg_num_parts to an integral value."));
-            }
+            MACSIO_LOG_MSG(Die, ("HDF5_S3 plugin cannot currently handle SIF mode"));
+            // float avg_num_parts = json_object_path_get_double(main_obj, "clargs/avg_num_parts");
+            // if (avg_num_parts == (float((int)avg_num_parts)))
+            // {
+            //     main_dump_tid = MT_StartTimer("main_dump_sif", main_dump_grp, dumpn);
+            //     main_dump_sif(main_obj, dumpn, dumpt);
+            //     timer_dt = MT_StopTimer(main_dump_tid);
+            // }
+            // else
+            // {
+            //     //#warning CURRENTLY, SIF CAN WORK ONLY ON WHOLE PART COUNTS
+            //     MACSIO_LOG_MSG(Die, ("HDF5 plugin cannot currently handle SIF mode where "
+            //                          "there are different numbers of parts on each MPI rank. "
+            //                          "Set --avg_num_parts to an integral value."));
+            // }
         }
         else if (!strcmp(modestr, "MIFMAX"))
             numFiles = json_object_path_get_int(main_obj, "parallel/mpi_size");
