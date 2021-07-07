@@ -7,6 +7,7 @@
 #include <macsio_main.h>
 #include <macsio_mif.h>
 #include <macsio_utils.h>
+#include <macsio_timing.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -68,15 +69,20 @@ static int process_args(
     // Read environment variables later, so they have a higher priority
     char *p = NULL;
     p = getenv("S3_ACCESS_KEY");
-    if (p != NULL) access_key = p;
+    if (p != NULL)
+        access_key = p;
     p = getenv("S3_SECRET_KEY");
-    if (p != NULL) secret_key = p;
+    if (p != NULL)
+        secret_key = p;
     p = getenv("S3_HOST");
-    if (p != NULL) host = p;
+    if (p != NULL)
+        host = p;
     p = getenv("S3_REGION");
-    if (p != NULL) auth_region = p;
+    if (p != NULL)
+        auth_region = p;
     p = getenv("S3_BUCKET");
-    if (p != NULL) sample_bucket = p;
+    if (p != NULL)
+        sample_bucket = p;
 
     return 0;
 }
@@ -205,13 +211,14 @@ static int putObjectDataCallback(int bufferSize, char *buffer, void *callbackDat
 static void write_mesh_part(
     FILE *myFile,         /**< [in] The file handle being used in a MIF dump */
     char *fileName,       /**< [in] Name of the MIF file */
-    json_object *part_obj /**< [in] The json object representing this mesh part */
+    json_object *part_obj, /**< [in] The json object representing this mesh part */
+    int dumpn
 )
 {
+    MACSIO_TIMING_GroupMask_t write_s3_mif_grp = MACSIO_TIMING_GroupMask("write_s3_mif");
+    MACSIO_TIMING_TimerId_t write_s3_mif_tid;
+    double timer_dt;
     put_object_callback_data data;
-    // struct stat statbuf;
-    const char sample_key[] = "hello.txt";
-    const char sample_file[] = "resource/hello.txt";
 
     S3PutObjectHandler putObjectHandler =
         {
@@ -220,7 +227,7 @@ static void write_mesh_part(
 
     //#warning SOMEHOW SHOULD INCLUDE OFFSETS TO EACH VARIABLE
     /* Write the json mesh part object as an ascii string */
-    data.dataStr = json_object_to_json_string_ext(part_obj, JSON_C_TO_STRING_PRETTY);
+    data.dataStr = json_object_to_json_string_ext(part_obj, JSON_C_TO_STRING_PLAIN);
     int contentLength = strlen(data.dataStr);
     data.contentLength = contentLength;
 
@@ -234,7 +241,9 @@ static void write_mesh_part(
         NULL,
         auth_region};
 
+    write_s3_mif_grp = MT_StartTimer("write_s3_mif", write_s3_mif_grp, dumpn);
     S3_put_object(&bucketContext, fileName, contentLength, NULL, NULL, 0, &putObjectHandler, &data);
+    timer_dt = MT_StopTimer(write_s3_mif_tid);
 
     printf(">>>> S3_put_object() finished \n");
     json_object_free_printbuf(part_obj);
@@ -268,6 +277,10 @@ static void main_dump(
     MACSIO_MIF_ioFlags_t ioFlags = {MACSIO_MIF_WRITE, (unsigned int)JsonGetInt(main_obj, "clargs/exercise_scr") & 0x1};
     MACSIO_MIF_baton_t *bat;
     json_object *parts;
+
+    MACSIO_TIMING_GroupMask_t main_dump_mif_grp = MACSIO_TIMING_GroupMask("main_dump_mif");
+    MACSIO_TIMING_TimerId_t main_dump_mif_tid;
+    double timer_dt;
 
     /* process cl args */
     process_args(argi, argc, argv);
@@ -326,7 +339,7 @@ static void main_dump(
     for (i = 0; i < json_object_array_length(parts); i++)
     {
         json_object *this_part = json_object_array_get_idx(parts, i);
-        write_mesh_part(myFile, fileName, this_part);
+        write_mesh_part(myFile, fileName, this_part, dumpn);
     }
 
     /* Hand off the baton to the next processor. This winds up closing
