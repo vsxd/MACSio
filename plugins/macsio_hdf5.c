@@ -141,10 +141,10 @@ static int show_errors = 0;
 static char compression_alg_str[64];
 static char compression_params_str[512];
 
-//
+// A parameter for H5Pset_fapl_core()
 static size_t vfd_core_increment = 1 << 21;
 
-// All necessary parameters for the S3 API
+// All necessary configurations for the S3 API
 static char *access_key = NULL;
 static char *secret_key = NULL;
 static char *host = NULL;
@@ -157,15 +157,12 @@ static hid_t make_fapl()
     hid_t fapl_id = H5Pcreate(H5P_FILE_ACCESS);
     herr_t h5status = 0;
 
+    /* Use Virtual File Drivers Core */
     herr_t ret_value = H5Pset_fapl_core(fapl_id, vfd_core_increment, false); //increment=2M
     if (ret_value < 0)
     {
         printf(">>>> hdf5 plugin, set Core VFD error");
     }
-    // herr_t ret_value = H5Pset_driver(fapl_id, H5FD_CORE, NULL);
-    // if (ret_value < 0){
-    //     printf(">>>> hdf5 plugin, H5Pset_driver() error");
-    // }
 
     if (sbuf_size >= 0)
         h5status |= H5Pset_sieve_buf_size(fapl_id, sbuf_size);
@@ -527,7 +524,7 @@ process_args(
 #endif
                                  MACSIO_CLARGS_END_OF_ARGS);
 
-    // Read environment variables for S3 configuration
+    // Read environment variables for S3 configurations
     char *p = NULL;
     p = getenv("S3_ACCESS_KEY");
     if (p != NULL)
@@ -545,7 +542,7 @@ process_args(
     if (p != NULL)
         sample_bucket = p;
 
-    printf("host=%s\nauth_region=%s\naccess_key=%s\nsecret_key=%s\nsample_bucket=%s\n", host, auth_region, access_key, secret_key, sample_bucket);
+    printf("===============\nhost=%s\nauth_region=%s\naccess_key=%s\nsecret_key=%s\nsample_bucket=%s\n===============\n", host, auth_region, access_key, secret_key, sample_bucket);
 
     if (!show_errors)
         H5Eset_auto1(0, 0);
@@ -631,11 +628,14 @@ CreateHDF5File(
     hid_t *retval = 0;
     hid_t h5File;
     hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+
+    /* Use Virtual File Drivers Core */
     herr_t ret_value = H5Pset_fapl_core(fapl, vfd_core_increment, false); //increment=2M
     if (ret_value < 0)
     {
         printf(">>>> hdf5 plugin, set Core VFD error");
     }
+
     H5Pset_fclose_degree(fapl, H5F_CLOSE_SEMI);
     h5File = H5Fcreate(fname, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
     H5Pclose(fapl);
@@ -665,11 +665,14 @@ OpenHDF5File(
     hid_t *retval;
     hid_t h5File;
     hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+
+    /* Use Virtual File Drivers Core */
     herr_t ret_value = H5Pset_fapl_core(fapl, vfd_core_increment, false); //increment=2M
     if (ret_value < 0)
     {
         printf(">>>> hdf5 plugin, set Core VFD error");
     }
+
     H5Pset_fclose_degree(fapl, H5F_CLOSE_SEMI);
     h5File = H5Fopen(fname, ioFlags.do_wr ? H5F_ACC_RDWR : H5F_ACC_RDONLY, fapl);
     H5Pclose(fapl);
@@ -828,8 +831,10 @@ main_dump_mif(
     void *image_ptr = malloc((size_t)image_size);
     /* load the image of the file into the buffer */
     size_t bytes_read = H5Fget_file_image(h5File, image_ptr, (size_t)image_size);
-    printf("image_size: %d\n", image_size);
-    printf("bytes_read: %d\n", bytes_read);
+
+    /* Debug output */
+    // printf("image_size: %d\n", image_size);
+    // printf("bytes_read: %d\n", bytes_read);
     // printf("%s\n", (char *)image_ptr);
 
     const S3BucketContext bucketContext = {
@@ -842,10 +847,12 @@ main_dump_mif(
         NULL,
         auth_region};
 
+    /* Put h5 file to object store
     main_dump_mif_grp = MT_StartTimer("write_s3_mif", main_dump_mif_grp, dumpn);
     S3_put_object(&bucketContext, fileName, image_size, NULL, NULL, 0, &putObjectHandler, image_ptr);
     timer_dt = MT_StopTimer(main_dump_mif_tid);
 
+    /* For test, write h5 file to disk */
     // FILE *file = fopen(fileName, "wb");
     // fwrite(image_ptr, image_size, 1, file);
     // fclose(file);
