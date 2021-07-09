@@ -120,7 +120,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 */
 
 /*! \brief name of this plugin */
-static char const *iface_name = "hdf5";
+static char const *iface_name = "hdf5s3";
 
 /*! \brief file extension for files managed by this plugin */
 static char const *iface_ext = "h5";
@@ -853,9 +853,9 @@ main_dump_mif(
     timer_dt = MT_StopTimer(main_dump_mif_tid);
 
     /* For test, write h5 file to disk */
-    // FILE *file = fopen(fileName, "wb");
-    // fwrite(image_ptr, image_size, 1, file);
-    // fclose(file);
+    FILE *file = fopen(fileName, "wb");
+    fwrite(image_ptr, image_size, 1, file);
+    fclose(file);
 
     /* If this is the 'root' processor, also write Silo's multi-XXX objects */
 #if 0

@@ -26,43 +26,24 @@
 # the main link for MACSio to allow dependent libraries that are common
 # to multiple plugins to be placed later on the link line. Bigger
 # numbers here cause them to appear later in the link line.
-HDF5_BUILD_ORDER = 1.0
+HDF5S3_BUILD_ORDER = 1.0
 
-HDF5_VERSION = 1.8.11
-HDF5_FILE = hdf5-$(HDF5_VERSION).tar.gz
-HDF5_URL = http://www.hdfgroup.org/ftp/HDF5/releases/hdf5-$(HDF5_VERSION)/src/$(HDF5_FILE)
+HDF5S3_VERSION = 0.1
 
 ifneq ($(HDF5_HOME),)
 
-HDF5_LDFLAGS = -L$(HDF5_HOME)/lib -lhdf5 -Wl,-rpath,$(HDF5_HOME)/lib
-HDF5_CFLAGS = -I$(HDF5_HOME)/include
+HDF5S3_LDFLAGS = -L$(HDF5_HOME)/lib -lhdf5 -Wl,-rpath,$(HDF5_HOME)/lib
+HDF5S3_CFLAGS = -I$(HDF5_HOME)/include
 
-HDF5_SOURCES = macsio_hdf5.c
+HDF5S3_SOURCES = macsio_hdf5s3.c
 
-ifneq ($(SZIP_HOME),)
-HDF5_LDFLAGS += -L$(SZIP_HOME)/lib -lsz -Wl,-rpath,$(SZIP_HOME)/lib
-HDF5_CFLAGS += -DHAVE_SZIP
-endif
+HDF5S3_LDFLAGS += -lz -lm
 
-ifneq ($(ZLIB_HOME),)
-HDF5_LDFLAGS += -L$(ZLIB_HOME)/lib
-endif
-
-HDF5_LDFLAGS += -lz -lm
-
-PLUGIN_OBJECTS += $(HDF5_SOURCES:.c=.o)
-PLUGIN_LDFLAGS += $(HDF5_LDFLAGS)
-PLUGIN_LIST += hdf5
+PLUGIN_OBJECTS += $(HDF5S3_SOURCES:.c=.o)
+PLUGIN_LDFLAGS += $(HDF5S3_LDFLAGS)
+PLUGIN_LIST += hdf5s3
 
 endif
 
-macsio_hdf5.o: ../plugins/macsio_hdf5.c
-	$(CXX) -c $(HDF5_CFLAGS) $(MACSIO_CFLAGS) $(CFLAGS) ../plugins/macsio_hdf5.c
-
-$(HDF5_FILE):
-	$(DLCMD) $(HDF5_FILE) $(HDF5_URL)
-
-list-tpls-hdf5:
-	@echo "$(HDF5_FILE) ($(HDF5_URL))"
-
-download-tpls-hdf5: $(HDF5_FILE)
+macsio_hdf5s3.o: ../plugins/macsio_hdf5s3.c
+	$(CXX) -c $(HDF5S3_CFLAGS) $(MACSIO_CFLAGS) $(CFLAGS) ../plugins/macsio_hdf5s3.c
