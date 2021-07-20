@@ -575,8 +575,8 @@ static const S3ResponseHandler responseHandler = {
 
 typedef struct put_object_callback_data
 {
-    const char *dataStr;
-    uint64_t contentLength;
+    const void * data;
+    size_t contentLength;
 } put_object_callback_data;
 
 static int putObjectDataCallback(int bufferSize, char *buffer, void *callbackData)
@@ -592,12 +592,12 @@ static int putObjectDataCallback(int bufferSize, char *buffer, void *callbackDat
 
         if (data->contentLength >= bufferSize)
         {
-            memcpy(buffer, data->dataStr, bufferSize);
+            memcpy(buffer, data->data, bufferSize);
             ret = bufferSize;
         }
         else
         {
-            memcpy(buffer, data->dataStr, data->contentLength);
+            memcpy(buffer, data->data, data->contentLength);
             ret = data->contentLength;
         }
     }
@@ -605,11 +605,6 @@ static int putObjectDataCallback(int bufferSize, char *buffer, void *callbackDat
     printf("contentLength: %d\n", data->contentLength);
     return ret;
 }
-
-static const S3PutObjectHandler putObjectHandler =
-    {
-        responseHandler,
-        &putObjectDataCallback};
 
 /*! \brief User data for MIF callbacks */
 typedef struct _user_data
@@ -824,19 +819,28 @@ main_dump_mif(
         H5Gclose(domain_group_id);
     }
 
+    put_object_callback_data put_data;
+
     H5Fflush(h5File, H5F_SCOPE_GLOBAL);
     /* get the size of the file */
     size_t image_size = H5Fget_file_image(h5File, NULL, (size_t)0);
+    put_data.contentLength = image_size;
     /* allocate a buffer of the appropriate size */
     void *image_ptr = malloc((size_t)image_size);
     /* load the image of the file into the buffer */
     size_t bytes_read = H5Fget_file_image(h5File, image_ptr, (size_t)image_size);
+    put_data.data = image_ptr;
 
     /* Debug output */
     // printf("image_size: %d\n", image_size);
     // printf("bytes_read: %d\n", bytes_read);
     // printf("%s\n", (char *)image_ptr);
 
+    const S3PutObjectHandler putObjectHandler =
+    {
+        responseHandler,
+        &putObjectDataCallback};
+    
     const S3BucketContext bucketContext = {
         host,
         sample_bucket,
@@ -847,9 +851,9 @@ main_dump_mif(
         NULL,
         auth_region};
 
-    /* Put h5 file to object store
+    /* Put h5 file to object store */
     main_dump_mif_grp = MT_StartTimer("write_s3_mif", main_dump_mif_grp, dumpn);
-    S3_put_object(&bucketContext, fileName, image_size, NULL, NULL, 0, &putObjectHandler, image_ptr);
+    S3_put_object(&bucketContext, fileName, image_size, NULL, NULL, 0, &putObjectHandler, &put_data);
     timer_dt = MT_StopTimer(main_dump_mif_tid);
 
     /* For test, write h5 file to disk */
