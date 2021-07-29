@@ -150,6 +150,8 @@ static char *secret_key = NULL;
 static char *host = NULL;
 static char *auth_region = NULL;
 static char *sample_bucket = NULL;
+static int statusG = 0;
+static char errorDetailsG[4096] = { 0 };
 
 /*! \brief create HDF5 library file access property list */
 static hid_t make_fapl()
@@ -524,26 +526,6 @@ process_args(
 #endif
                                  MACSIO_CLARGS_END_OF_ARGS);
 
-    // Read environment variables for S3 configurations
-    char *p = NULL;
-    p = getenv("S3_ACCESS_KEY");
-    if (p != NULL)
-        access_key = p;
-    p = getenv("S3_SECRET_KEY");
-    if (p != NULL)
-        secret_key = p;
-    p = getenv("S3_HOST");
-    if (p != NULL)
-        host = p;
-    p = getenv("S3_REGION");
-    if (p != NULL)
-        auth_region = p;
-    p = getenv("S3_BUCKET");
-    if (p != NULL)
-        sample_bucket = p;
-
-    printf("===============\nhost=%s\nauth_region=%s\naccess_key=%s\nsecret_key=%s\nsample_bucket=%s\n===============\n", host, auth_region, access_key, secret_key, sample_bucket);
-
     if (!show_errors)
         H5Eset_auto1(0, 0);
     return 0;
@@ -552,6 +534,19 @@ process_args(
 /*
 libs3 related functions
 */
+static void S3_init(void)
+{
+    S3Status status;
+    
+    if ((status = S3_initialize("s3", S3_INIT_ALL, host))
+        != S3StatusOK) {
+        fprintf(stderr, "Failed to initialize libs3: %s\n", 
+                S3_get_status_name(status));
+        exit(-1);
+    }
+}
+
+
 static S3Status responsePropertiesCallback(
     const S3ResponseProperties *properties,
     void *callbackData)
@@ -560,13 +555,56 @@ static S3Status responsePropertiesCallback(
     return S3StatusOK;
 }
 
+// This callback does the same thing for every request type: saves the status
+// and error stuff in global variables
 static void responseCompleteCallback(
     S3Status status,
     const S3ErrorDetails *error,
     void *callbackData)
 {
-    // printf(">>>> responseCompleteCallback(): %s\n", error->message);
-    return;
+    statusG = status;
+    int flag = 0;
+
+    // Compose the error details message now, although we might not use it.
+    // Can't just save a pointer to [error] since it's not guaranteed to last
+    // beyond this callback
+    int len = 0;
+    if (error && error->message) {
+        len += snprintf(&(errorDetailsG[len]), sizeof(errorDetailsG) - len,
+                        "  Message: %s\n", error->message);
+        printf("%s\n", errorDetailsG);
+        flag = 1;
+    }
+    if (error && error->resource) {
+        len += snprintf(&(errorDetailsG[len]), sizeof(errorDetailsG) - len,
+                        "  Resource: %s\n", error->resource);
+        printf("%s\n", errorDetailsG);
+        flag = 1;
+    }
+    if (error && error->furtherDetails) {
+        len += snprintf(&(errorDetailsG[len]), sizeof(errorDetailsG) - len,
+                        "  Further Details: %s\n", error->furtherDetails);
+        printf("%s\n", errorDetailsG);
+        flag = 1;
+    }
+    if (error && error->extraDetailsCount) {
+        len += snprintf(&(errorDetailsG[len]), sizeof(errorDetailsG) - len,
+                        "%s", "  Extra Details:\n");
+        int i;
+        for (i = 0; i < error->extraDetailsCount; i++) {
+            len += snprintf(&(errorDetailsG[len]), 
+                            sizeof(errorDetailsG) - len, "    %s: %s\n", 
+                            error->extraDetails[i].name,
+                            error->extraDetails[i].value);
+        }
+        printf("%s\n", errorDetailsG);
+        flag = 1;
+    }
+    if (flag || status != S3StatusOK) {
+        // fast fail
+        printf("responseCompleteCallback() got a error, exit.\n\n");
+        exit(1);
+    }
 }
 
 static const S3ResponseHandler responseHandler = {
@@ -601,8 +639,9 @@ static int putObjectDataCallback(int bufferSize, char *buffer, void *callbackDat
             ret = data->contentLength;
         }
     }
+    data->data = (char *) data->data + ret;
     data->contentLength -= ret;
-    printf("contentLength: %d\n", data->contentLength);
+    // printf("contentLength: %d\n", data->contentLength);
     return ret;
 }
 
@@ -835,6 +874,7 @@ main_dump_mif(
     // printf("image_size: %d\n", image_size);
     // printf("bytes_read: %d\n", bytes_read);
     // printf("%s\n", (char *)image_ptr);
+    S3_init();
 
     const S3PutObjectHandler putObjectHandler =
     {
@@ -855,6 +895,8 @@ main_dump_mif(
     main_dump_mif_grp = MT_StartTimer("write_s3_mif", main_dump_mif_grp, dumpn);
     S3_put_object(&bucketContext, fileName, image_size, NULL, NULL, 0, &putObjectHandler, &put_data);
     timer_dt = MT_StopTimer(main_dump_mif_tid);
+
+    // printf("S3 put object: %s\n", fileName);
 
     /* For test, write h5 file to disk */
     // FILE *file = fopen(fileName, "wb");
@@ -878,6 +920,8 @@ main_dump_mif(
     main_dump_mif_tid = MT_StartTimer("MACSIO_MIF_Finish", main_dump_mif_grp, dumpn);
     MACSIO_MIF_Finish(bat);
     timer_dt = MT_StopTimer(main_dump_mif_tid);
+    
+    S3_deinitialize();
 }
 
 /*!
@@ -993,6 +1037,27 @@ register_this_interface()
     /* Register this plugin */
     if (!MACSIO_IFACE_Register(&iface))
         MACSIO_LOG_MSG(Die, ("Failed to register interface \"%s\"", iface_name));
+
+
+    // Read environment variables for S3 configurations
+    char *p = NULL;
+    p = getenv("S3_ACCESS_KEY");
+    if (p != NULL)
+        access_key = p;
+    p = getenv("S3_SECRET_KEY");
+    if (p != NULL)
+        secret_key = p;
+    p = getenv("S3_HOST");
+    if (p != NULL)
+        host = p;
+    p = getenv("S3_REGION");
+    if (p != NULL)
+        auth_region = p;
+    p = getenv("S3_BUCKET");
+    if (p != NULL)
+        sample_bucket = p;
+
+    printf("==== S3 info\nhost=%s\nauth_region=%s\naccess_key=%s\nsecret_key=%s\nsample_bucket=%s\n====\n", host, auth_region, access_key, secret_key, sample_bucket);
 
     return 0;
 }
