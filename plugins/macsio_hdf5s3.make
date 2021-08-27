@@ -1,10 +1,7 @@
-# Copyright (c) 2015, Lawrence Livermore National Security, LLC.
-# Produced at the Lawrence Livermore National Laboratory.
-# Written by Mark C. Miller
+# Copyright (c) 2021, Xudong Sun.
+# Produced at EPCC, the University of Edinburgh.
 #
-# LLNL-CODE-676051. All rights reserved.
-#
-# This file is part of MACSio
+# All rights reserved.
 # 
 # Please also read the LICENSE file at the top of the source code directory or
 # folder hierarchy.
@@ -17,10 +14,6 @@
 # ANY WARRANTY; without even the IMPLIED WARRANTY OF MERCHANTABILITY or FITNESS
 # FOR A PARTICULAR PURPOSE. See the terms and conditions of the GNU General
 # Public License for more details.
-# 
-# You should have received a copy of the GNU General Public License along with
-# this program; if not, write to the Free Software Foundation, Inc., 59 Temple
-# Place, Suite 330, Boston, MA 02111-1307 USA
 
 # This floating point variable is used to order plugin objects during
 # the main link for MACSio to allow dependent libraries that are common

@@ -1,11 +1,8 @@
 /*
-Copyright (c) 2015, Lawrence Livermore National Security, LLC.
-Produced at the Lawrence Livermore National Laboratory.
-Written by Mark C. Miller
+Copyright (c) 2021, Xudong Sun.
+Produced at EPCC, the University of Edinburgh.
 
-LLNL-CODE-676051. All rights reserved.
-
-This file is part of MACSio
+All rights reserved.
 
 Please also read the LICENSE file at the top of the source code directory or
 folder hierarchy.
@@ -18,10 +15,6 @@ This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the IMPLIED WARRANTY OF MERCHANTABILITY or FITNESS
 FOR A PARTICULAR PURPOSE. See the terms and conditions of the GNU General
 Public License for more details.
-
-You should have received a copy of the GNU General Public License along with
-this program; if not, write to the Free Software Foundation, Inc., 59 Temple
-Place, Suite 330, Boston, MA 02111-1307 USA
 */
 
 #include <limits.h>
@@ -45,70 +38,8 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <mpi.h>
 #endif
 
-// #ifdef HAVE_SILO
-// #include <silo.h> /* for the Silo block based VFD option */
-// #endif
-
 #include <H5pubconf.h>
 #include <hdf5.h>
-
-/*! \brief H5Z-ZFP generic interface for setting rate mode */
-#define H5Pset_zfp_rate_cdata(R, N, CD)        \
-    do                                         \
-    {                                          \
-        if (N >= 4)                            \
-        {                                      \
-            double *p = (double *)&CD[2];      \
-            CD[0] = CD[1] = CD[2] = CD[3] = 0; \
-            CD[0] = 1;                         \
-            *p = R;                            \
-            N = 4;                             \
-        }                                      \
-    } while (0)
-
-/*! \brief H5Z-ZFP generic interface for setting precision mode */
-#define H5Pset_zfp_precision_cdata(P, N, CD) \
-    do                                       \
-    {                                        \
-        if (N >= 3)                          \
-        {                                    \
-            CD[0] = CD[1] = CD[2];           \
-            CD[0] = 2;                       \
-            CD[2] = P;                       \
-            N = 3;                           \
-        }                                    \
-    } while (0)
-
-/*! \brief H5Z-ZFP generic interface for setting accuracy mode */
-#define H5Pset_zfp_accuracy_cdata(A, N, CD)    \
-    do                                         \
-    {                                          \
-        if (N >= 4)                            \
-        {                                      \
-            double *p = (double *)&CD[2];      \
-            CD[0] = CD[1] = CD[2] = CD[3] = 0; \
-            CD[0] = 3;                         \
-            *p = A;                            \
-            N = 4;                             \
-        }                                      \
-    } while (0)
-
-/*! \brief H5Z-ZFP generic interface for setting expert mode */
-#define H5Pset_zfp_expert_cdata(MiB, MaB, MaP, MiE, N, CD)     \
-    do                                                         \
-    {                                                          \
-        if (N >= 6)                                            \
-        {                                                      \
-            CD[0] = CD[1] = CD[2] = CD[3] = CD[4] = CD[5] = 0; \
-            CD[0] = 4;                                         \
-            CD[2] = MiB;                                       \
-            CD[3] = MaB;                                       \
-            CD[4] = MaP;                                       \
-            CD[5] = (unsigned int)MiE;                         \
-            N = 6;                                             \
-        }                                                      \
-    } while (0)
-
 /*!
 \addtogroup plugins
 @{
@@ -153,6 +84,115 @@ static char *sample_bucket = NULL;
 static int statusG = 0;
 static char errorDetailsG[4096] = { 0 };
 
+/*
+libs3 related functions
+*/
+static void S3_init(void)
+{ // init libs3
+    S3Status status;
+    
+    if ((status = S3_initialize("s3", S3_INIT_ALL, host))
+        != S3StatusOK) {
+        fprintf(stderr, "Failed to initialize libs3: %s\n", 
+                S3_get_status_name(status));
+        exit(-1);
+    }
+}
+
+static S3Status responsePropertiesCallback(
+    const S3ResponseProperties *properties,
+    void *callbackData)
+{ // a callback function required by responseHandler
+    return S3StatusOK;
+}
+
+// This callback does the same thing for every request type: saves the status
+// and error stuff in global variables
+static void responseCompleteCallback(
+    S3Status status,
+    const S3ErrorDetails *error,
+    void *callbackData)
+{
+    statusG = status;
+    int flag = 0;
+
+    // Compose the error details message now, although we might not use it.
+    // Can't just save a pointer to [error] since it's not guaranteed to last
+    // beyond this callback
+    int len = 0;
+    if (error && error->message) {
+        len += snprintf(&(errorDetailsG[len]), sizeof(errorDetailsG) - len,
+                        "  Message: %s\n", error->message);
+        printf("%s\n", errorDetailsG);
+        flag = 1;
+    }
+    if (error && error->resource) {
+        len += snprintf(&(errorDetailsG[len]), sizeof(errorDetailsG) - len,
+                        "  Resource: %s\n", error->resource);
+        printf("%s\n", errorDetailsG);
+        flag = 1;
+    }
+    if (error && error->furtherDetails) {
+        len += snprintf(&(errorDetailsG[len]), sizeof(errorDetailsG) - len,
+                        "  Further Details: %s\n", error->furtherDetails);
+        printf("%s\n", errorDetailsG);
+        flag = 1;
+    }
+    if (error && error->extraDetailsCount) {
+        len += snprintf(&(errorDetailsG[len]), sizeof(errorDetailsG) - len,
+                        "%s", "  Extra Details:\n");
+        int i;
+        for (i = 0; i < error->extraDetailsCount; i++) {
+            len += snprintf(&(errorDetailsG[len]), 
+                            sizeof(errorDetailsG) - len, "    %s: %s\n", 
+                            error->extraDetails[i].name,
+                            error->extraDetails[i].value);
+        }
+        printf("%s\n", errorDetailsG);
+        flag = 1;
+    }
+    if (flag || status != S3StatusOK) {
+        // fast fail
+        printf("responseCompleteCallback() got a error, exit.\n\n");
+        exit(1);
+    }
+}
+
+static const S3ResponseHandler responseHandler = {
+    &responsePropertiesCallback,
+    &responseCompleteCallback};
+
+typedef struct put_object_callback_data
+{
+    const void * data;
+    size_t contentLength; // Length of data (number of bytes)
+} put_object_callback_data;
+
+static int putObjectDataCallback(int bufferSize, char *buffer, void *callbackData)
+{ // a callback function required by responseHandler
+    put_object_callback_data *data = (put_object_callback_data *)callbackData;
+    int ret = 0; // Number of bytes written in a single call
+
+    if (data->contentLength)
+    {
+        if (data->contentLength >= bufferSize)
+        { // Data length greater than buffer size
+            memcpy(buffer, data->data, bufferSize);
+            ret = bufferSize;
+        }
+        else
+        { // Data can be entirely put into the buffer
+            memcpy(buffer, data->data, data->contentLength);
+            ret = data->contentLength;
+        }
+    }
+    data->data = (char *) data->data + ret;
+    data->contentLength -= ret;
+    // printf("contentLength: %d\n", data->contentLength);
+    return ret;
+}
+
+
 /*! \brief create HDF5 library file access property list */
 static hid_t make_fapl()
 {
@@ -174,25 +214,6 @@ static hid_t make_fapl()
 
     if (rbuf_size >= 0)
         h5status |= H5Pset_small_data_block_size(fapl_id, mbuf_size);
-
-#if 0
-    if (silo_block_size && silo_block_count)
-    {
-        h5status |= H5Pset_fapl_silo(fapl_id);
-        h5status |= H5Pset_silo_block_size_and_count(fapl_id, (hsize_t) silo_block_size,
-            silo_block_count);
-    }
-    else
-    if (use_log)
-    {
-        int flags = H5FD_LOG_LOC_IO|H5FD_LOG_NUM_IO|H5FD_LOG_TIME_IO|H5FD_LOG_ALLOC;
-
-        if (lbuf_size > 0)
-            flags = H5FD_LOG_ALL;
-
-        h5status |= H5Pset_fapl_log(fapl_id, "macsio_hdf5_log.out", flags, lbuf_size);
-    }
-#endif
 
     {
         H5AC_cache_config_t config;
@@ -355,67 +376,16 @@ make_dcpl(
         unsigned int cd_values[10];
         int cd_nelmts = 10;
 
-        /* Setup ZFP filter and add to HDF5 pipeline using generic interface. */
-        if (zfp_rate != -1)
-            H5Pset_zfp_rate_cdata(zfp_rate, cd_nelmts, cd_values);
-        else if (zfp_precision != -1)
-            H5Pset_zfp_precision_cdata(zfp_precision, cd_nelmts, cd_values);
-        else if (zfp_accuracy != -1)
-            H5Pset_zfp_accuracy_cdata(zfp_accuracy, cd_nelmts, cd_values);
-        else
-            H5Pset_zfp_rate_cdata(0.0, cd_nelmts, cd_values); /* to get ZFP library defaults */
-
         /* Add filter to the pipeline via generic interface */
         if (H5Pset_filter(retval, 32013, H5Z_FLAG_MANDATORY, cd_nelmts, cd_values) < 0)
             MACSIO_LOG_MSG(Warn, ("Unable to set up H5Z-ZFP compressor"));
     }
     else if (!strncasecmp(alg_str, "szip", 4))
     {
-#ifdef HAVE_SZIP
-        unsigned int method = H5_SZIP_NN_OPTION_MASK;
-        int const szip_max_blocks_per_scanline = 128; /* from szip lib */
-
-        if (shuffle == -1 || shuffle == 1)
-            H5Pset_shuffle(retval);
-
-        if (szip_pixels_per_block == 0)
-            szip_pixels_per_block = 32;
-        if (!strcasecmp(szip_method, "ec"))
-            method = H5_SZIP_EC_OPTION_MASK;
-
-        H5Pset_szip(retval, method, szip_pixels_per_block);
-
-        if (strlen(szip_chunk_str))
-        {
-            hsize_t chunk_dims[3] = {0, 0, 0};
-            int i, vals[3];
-            int nvals = sscanf(szip_chunk_str, "%d:%d:%d", &vals[0], &vals[1], &vals[2]);
-            if (nvals == ndims)
-            {
-                for (i = 0; i < ndims; i++)
-                    chunk_dims[i] = vals[i];
-            }
-            else if (nvals == ndims - 1)
-            {
-                chunk_dims[0] = szip_max_blocks_per_scanline * szip_pixels_per_block;
-                for (i = 1; i < ndims; i++)
-                    chunk_dims[i] = vals[i - 1];
-            }
-            for (i = 0; i < ndims; i++)
-            {
-                if (chunk_dims[i] > dims[i])
-                    chunk_dims[i] = dims[0];
-                if (chunk_dims[i] == 0)
-                    chunk_dims[i] = dims[0];
-            }
-            H5Pset_chunk(retval, ndims, chunk_dims);
-        }
-#else
         static int have_issued_warning = 0;
         if (!have_issued_warning)
             MACSIO_LOG_MSG(Warn, ("szip compressor not available in this build"));
         have_issued_warning = 1;
-#endif
     }
 
     return retval;
@@ -529,120 +499,6 @@ process_args(
     if (!show_errors)
         H5Eset_auto1(0, 0);
     return 0;
-}
-
-/*
-libs3 related functions
-*/
-static void S3_init(void)
-{
-    S3Status status;
-    
-    if ((status = S3_initialize("s3", S3_INIT_ALL, host))
-        != S3StatusOK) {
-        fprintf(stderr, "Failed to initialize libs3: %s\n", 
-                S3_get_status_name(status));
-        exit(-1);
-    }
-}
-
-
-static S3Status responsePropertiesCallback(
-    const S3ResponseProperties *properties,
-    void *callbackData)
-{
-    // printf("responsePropertiesCallback\n");
-    return S3StatusOK;
-}
-
-// This callback does the same thing for every request type: saves the status
-// and error stuff in global variables
-static void responseCompleteCallback(
-    S3Status status,
-    const S3ErrorDetails *error,
-    void *callbackData)
-{
-    statusG = status;
-    int flag = 0;
-
-    // Compose the error details message now, although we might not use it.
-    // Can't just save a pointer to [error] since it's not guaranteed to last
-    // beyond this callback
-    int len = 0;
-    if (error && error->message) {
-        len += snprintf(&(errorDetailsG[len]), sizeof(errorDetailsG) - len,
-                        "  Message: %s\n", error->message);
-        printf("%s\n", errorDetailsG);
-        flag = 1;
-    }
-    if (error && error->resource) {
-        len += snprintf(&(errorDetailsG[len]), sizeof(errorDetailsG) - len,
-                        "  Resource: %s\n", error->resource);
-        printf("%s\n", errorDetailsG);
-        flag = 1;
-    }
-    if (error && error->furtherDetails) {
-        len += snprintf(&(errorDetailsG[len]), sizeof(errorDetailsG) - len,
-                        "  Further Details: %s\n", error->furtherDetails);
-        printf("%s\n", errorDetailsG);
-        flag = 1;
-    }
-    if (error && error->extraDetailsCount) {
-        len += snprintf(&(errorDetailsG[len]), sizeof(errorDetailsG) - len,
-                        "%s", "  Extra Details:\n");
-        int i;
-        for (i = 0; i < error->extraDetailsCount; i++) {
-            len += snprintf(&(errorDetailsG[len]), 
-                            sizeof(errorDetailsG) - len, "    %s: %s\n", 
-                            error->extraDetails[i].name,
-                            error->extraDetails[i].value);
-        }
-        printf("%s\n", errorDetailsG);
-        flag = 1;
-    }
-    if (flag || status != S3StatusOK) {
-        // fast fail
-        printf("responseCompleteCallback() got a error, exit.\n\n");
-        exit(1);
-    }
-}
-
-static const S3ResponseHandler responseHandler = {
-    &responsePropertiesCallback,
-    &responseCompleteCallback};
-
-typedef struct put_object_callback_data
-{
-    const void * data;
-    size_t contentLength;
-} put_object_callback_data;
-
-static int putObjectDataCallback(int bufferSize, char *buffer, void *callbackData)
-{
-    put_object_callback_data *data = (put_object_callback_data *)callbackData;
-
-    int ret = 0;
-
-    if (data->contentLength)
-    {
-        // int toRead = ((data->contentLength > (unsigned)bufferSize) ? (unsigned)bufferSize : data->contentLength);
-        // ret = fread(buffer, 1, toRead, data->infile);
-
-        if (data->contentLength >= bufferSize)
-        {
-            memcpy(buffer, data->data, bufferSize);
-            ret = bufferSize;
-        }
-        else
-        {
-            memcpy(buffer, data->data, data->contentLength);
-            ret = data->contentLength;
-        }
-    }
-    data->data = (char *) data->data + ret;
-    data->contentLength -= ret;
-    // printf("contentLength: %d\n", data->contentLength);
-    return ret;
 }
 
 /*! \brief User data for MIF callbacks */
@@ -826,7 +682,7 @@ main_dump_mif(
     size = json_object_path_get_int(main_obj, "parallel/mpi_size");
 
     /* Construct name for the silo file */
-    sprintf(fileName, "%s_hdf5_%05d_%03d.%s",
+    sprintf(fileName, "%s_hdf5s3_%05d_%03d.%s",
             json_object_path_get_string(main_obj, "clargs/filebase"),
             MACSIO_MIF_RankOfGroup(bat, rank),
             dumpn,
@@ -884,7 +740,7 @@ main_dump_mif(
     const S3BucketContext bucketContext = {
         host,
         sample_bucket,
-        S3ProtocolHTTPS,
+        S3ProtocolHTTP,
         S3UriStylePath,
         access_key,
         secret_key,
@@ -896,18 +752,11 @@ main_dump_mif(
     S3_put_object(&bucketContext, fileName, image_size, NULL, NULL, 0, &putObjectHandler, &put_data);
     timer_dt = MT_StopTimer(main_dump_mif_tid);
 
+    /* For debug, write h5 file to disk */
     // printf("S3 put object: %s\n", fileName);
-
-    /* For test, write h5 file to disk */
     // FILE *file = fopen(fileName, "wb");
     // fwrite(image_ptr, image_size, 1, file);
     // fclose(file);
-
-    /* If this is the 'root' processor, also write Silo's multi-XXX objects */
-#if 0
-    if (rank == 0)
-        WriteMultiXXXObjects(main_obj, siloFile, bat);
-#endif
 
     /* Hand off the baton to the next processor. This winds up closing
      * the file so that the next processor that opens it can be assured
@@ -986,20 +835,6 @@ main_dump(
         if (!strcmp(modestr, "SIF"))
         {
             MACSIO_LOG_MSG(Die, ("HDF5_S3 plugin cannot currently handle SIF mode"));
-            // float avg_num_parts = json_object_path_get_double(main_obj, "clargs/avg_num_parts");
-            // if (avg_num_parts == (float((int)avg_num_parts)))
-            // {
-            //     main_dump_tid = MT_StartTimer("main_dump_sif", main_dump_grp, dumpn);
-            //     main_dump_sif(main_obj, dumpn, dumpt);
-            //     timer_dt = MT_StopTimer(main_dump_tid);
-            // }
-            // else
-            // {
-            //     //#warning CURRENTLY, SIF CAN WORK ONLY ON WHOLE PART COUNTS
-            //     MACSIO_LOG_MSG(Die, ("HDF5 plugin cannot currently handle SIF mode where "
-            //                          "there are different numbers of parts on each MPI rank. "
-            //                          "Set --avg_num_parts to an integral value."));
-            // }
         }
         else if (!strcmp(modestr, "MIFMAX"))
             numFiles = json_object_path_get_int(main_obj, "parallel/mpi_size");
@@ -1038,26 +873,16 @@ register_this_interface()
     if (!MACSIO_IFACE_Register(&iface))
         MACSIO_LOG_MSG(Die, ("Failed to register interface \"%s\"", iface_name));
 
-
     // Read environment variables for S3 configurations
-    char *p = NULL;
-    p = getenv("S3_ACCESS_KEY");
-    if (p != NULL)
-        access_key = p;
-    p = getenv("S3_SECRET_KEY");
-    if (p != NULL)
-        secret_key = p;
-    p = getenv("S3_HOST");
-    if (p != NULL)
-        host = p;
-    p = getenv("S3_REGION");
-    if (p != NULL)
-        auth_region = p;
-    p = getenv("S3_BUCKET");
-    if (p != NULL)
-        sample_bucket = p;
+    access_key = getenv("S3_ACCESS_KEY");
+    secret_key = getenv("S3_SECRET_KEY");
+    host = getenv("S3_HOST");
+    char *p = getenv("S3_REGION");
+    if (p != NULL) auth_region = p;
+    sample_bucket = getenv("S3_BUCKET");
 
-    printf("==== S3 info\nhost=%s\nauth_region=%s\naccess_key=%s\nsecret_key=%s\nsample_bucket=%s\n====\n", host, auth_region, access_key, secret_key, sample_bucket);
+    // for debug
+    // printf("==== S3 info\nhost=%s\nauth_region=%s\naccess_key=%s\nsecret_key=%s\nsample_bucket=%s\n====\n", host, auth_region, access_key, secret_key, sample_bucket);
 
     return 0;
 }
